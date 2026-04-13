@@ -63,7 +63,8 @@ const STARTING_WAIT_INTERVAL_MS = 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 120000;
-const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 15000;
+const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 20000;
+const DEFAULT_TOOL_TIMEOUT_MS = 600000;
 
 const OPENCODE_BASENAME = 'opencode';
 
@@ -539,11 +540,23 @@ export function createApp(config) {
         }
     };
 
-    async function promptWithTimeout(promptParams, timeoutMs) {
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs);
-        });
-        return Promise.race([client.session.prompt(promptParams), timeoutPromise]);
+    async function promptWithTimeout(promptParams, timeoutMs, retryCount = 2) {
+        const attempt = async (retriesLeft) => {
+            try {
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs);
+                });
+                return Promise.race([client.session.prompt(promptParams), timeoutPromise]);
+            } catch (err) {
+                if (retriesLeft > 0 && (err.message.includes('timeout') || err.message.includes('network') || err.message.includes('ECONNREFUSED'))) {
+                    logDebug('Prompt failed, retrying', { retriesLeft, error: err.message });
+                    await sleep(1000);
+                    return attempt(retriesLeft - 1);
+                }
+                throw err;
+            }
+        };
+        return attempt(retryCount);
     }
 
     const getCleanupRoots = () => {
@@ -988,18 +1001,23 @@ export function createApp(config) {
                         const ensureKeepalive = () => {
                             if (!keepaliveInterval) {
                                 keepaliveInterval = setInterval(() => {
-                                    if (!res.destroyed) {
+                                    if (!res.destroyed && res.writable) {
                                         res.write(': keepalive\n\n');
                                     }
-                                }, 15000);
+                                }, 10000);
                             }
                         };
                         ensureKeepalive();
 
                         const sendDelta = (delta, isReasoning = false) => {
+                            if (clientDisconnected) return;
                             if (!delta || typeof delta !== 'string') return;
                             const trimmed = delta.trim();
                             if (!trimmed) return;
+                            if (!res.writable) {
+                                clientDisconnected = true;
+                                return;
+                            }
                             const filtered = isReasoning ? filterReasoningDelta(delta) : filterContentDelta(delta);
                             if (!filtered) return;
                             if (isReasoning) {
@@ -1047,6 +1065,18 @@ export function createApp(config) {
                             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         };
 
+                        let clientDisconnected = false;
+                        res.on('close', () => {
+                            clientDisconnected = true;
+                            logDebug('Client disconnected', { sessionId });
+                            if (keepaliveInterval) clearInterval(keepaliveInterval);
+                        });
+
+                        res.on('error', (err) => {
+                            clientDisconnected = true;
+                            logDebug('Response error', { sessionId, error: err.message });
+                        });
+
                         let collected = null;
                         try {
                             const collectPromise = collectFromEvents(
@@ -1065,6 +1095,10 @@ export function createApp(config) {
                         }
 
                         if (collected && collected.__error) {
+                            if (clientDisconnected) {
+                                logDebug('Client disconnected before fallback', { sessionId });
+                                return;
+                            }
                             logDebug('SSE collect error, falling back to polling', {
                                 sessionId,
                                 error: collected.__error?.message
@@ -1079,6 +1113,10 @@ export function createApp(config) {
                                 if (safeContent) sendDelta(safeContent, false);
                             }
                         } else if (collected && collected.noData) {
+                            if (clientDisconnected) {
+                                logDebug('Client disconnected before fallback', { sessionId });
+                                return;
+                            }
                             logDebug('Fallback to polling (stream)', { sessionId });
                             const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
                             if (error && !content && !reasoning) {
@@ -1090,6 +1128,10 @@ export function createApp(config) {
                                 if (safeContent) sendDelta(safeContent, false);
                             }
                         } else if (collected && collected.idleTimeout) {
+                            if (clientDisconnected) {
+                                logDebug('Client disconnected before fallback', { sessionId });
+                                return;
+                            }
                             logDebug('SSE idle timeout, polling for completion', { sessionId });
                             const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
                             if (error && !content && !reasoning) {
@@ -1109,11 +1151,19 @@ export function createApp(config) {
                         }
 
                         if (collected && !streamedContent && !streamedReasoning && (collected.reasoning || collected.content)) {
+                            if (clientDisconnected) {
+                                logDebug('Client disconnected, skipping remaining delta', { sessionId });
+                                return;
+                            }
                             if (collected.reasoning) sendDelta(collected.reasoning, true);
                             if (collected.content) sendDelta(collected.content, false);
                         }
 
                         if (!streamedContent && !streamedReasoning) {
+                            if (clientDisconnected) {
+                                logDebug('Client disconnected before fallback', { sessionId });
+                                return;
+                            }
                             logDebug('SSE returned empty, falling back to polling', { sessionId });
                             try {
                                 const pollResult = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
@@ -1141,6 +1191,12 @@ export function createApp(config) {
                                 streamedContentLen: streamedContent.length,
                                 streamedReasoningLen: streamedReasoning.length
                             });
+                        }
+
+                        if (clientDisconnected) {
+                            logDebug('Client disconnected, stopping stream', { sessionId });
+                            if (keepaliveInterval) clearInterval(keepaliveInterval);
+                            return;
                         }
 
                         if (insideReasoning) {
