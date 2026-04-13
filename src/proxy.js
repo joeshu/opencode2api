@@ -1206,27 +1206,31 @@ export function createApp(config) {
                             });
                             if (collected.reasoning) sendDelta(collected.reasoning, true);
                             if (collected.content) sendDelta(collected.content, false);
-                        } else if (!streamedContent && !streamedReasoning) {
+                        } else                         if (!streamedContent && !streamedReasoning) {
                             if (clientDisconnected) {
                                 logDebug('Client disconnected before fallback', { sessionId });
                                 return;
                             }
-                            logDebug('No streamed content, falling back to polling', { sessionId });
+                            logDebug('No streamed content, polling for response', { sessionId });
                             try {
                                 const pollResult = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
-                                const { content: pollContent, reasoning: pollReasoning, error } = pollResult;
+                                const { content: pollContent, reasoning: pollReasoning, error, partial } = pollResult;
                                 if (error && !pollContent && !pollReasoning) {
                                     sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
-                                } else {
+                                } else if (pollContent || pollReasoning) {
                                     const safeReasoning = stripFunctionCalls(pollReasoning || '', false);
                                     const safeContent = stripFunctionCalls(pollContent || '', false);
                                     logDebug('Polling fallback result', {
                                         sessionId,
                                         contentLen: safeContent.length,
-                                        reasoningLen: safeReasoning.length
+                                        reasoningLen: safeReasoning.length,
+                                        isPartial: partial,
+                                        done: !partial
                                     });
                                     if (safeReasoning) sendDelta(safeReasoning, true);
                                     if (safeContent) sendDelta(safeContent, false);
+                                } else {
+                                    sendDelta('[Proxy Error] No response content received');
                                 }
                             } catch (pollError) {
                                 logDebug('Polling fallback error', { sessionId, error: pollError.message });
