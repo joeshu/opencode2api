@@ -758,6 +758,8 @@ export function createApp(config) {
                         eventCount++;
                         const eventSessionId = event?.properties?.part?.sessionID || event?.properties?.info?.sessionID;
                         const isTargetSession = eventSessionId === sessionId || !eventSessionId;
+                        const delta = event?.properties?.delta;
+                        const part = event?.properties?.part;
                         
                         logDebug('SSE event received', {
                             eventNum: eventCount,
@@ -765,10 +767,12 @@ export function createApp(config) {
                             eventSessionId,
                             targetSessionId: sessionId,
                             isTargetSession,
-                            hasDelta: Boolean(event?.properties?.delta),
-                            deltaLen: event?.properties?.delta?.length || 0,
-                            partType: event?.properties?.part?.type,
-                            hasInfo: Boolean(event?.properties?.info)
+                            hasDelta: Boolean(delta),
+                            deltaLen: delta?.length || 0,
+                            partType: part?.type || event?.properties?.info?.type,
+                            hasInfo: Boolean(event?.properties?.info),
+                            keys: Object.keys(event?.properties || {}),
+                            finish: event?.properties?.info?.finish
                         });
                         
                         if (!isTargetSession) {
@@ -776,8 +780,7 @@ export function createApp(config) {
                             continue;
                         }
                         
-                        if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
-                            const { part, delta } = event.properties;
+                        if (event.type === 'message.part.updated' && part?.sessionID === sessionId) {
                             if (delta) {
                                 receivedDelta = true;
                                 if (firstDeltaTimer) clearTimeout(firstDeltaTimer);
@@ -799,10 +802,9 @@ export function createApp(config) {
                                 }
                                 deltaChars += delta.length;
                             }
-                        }
-                        if (event.type === 'message.updated' &&
-                            event.properties.info.sessionID === sessionId &&
-                            event.properties.info.finish === 'stop') {
+                        } else if (event.type === 'message.updated' &&
+                            event.properties.info?.sessionID === sessionId &&
+                            event.properties.info?.finish === 'stop') {
                             if (!finished) {
                                 finished = true;
                                 clearTimeout(timeoutId);
