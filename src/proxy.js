@@ -62,8 +62,8 @@ const STARTING_WAIT_ITERATIONS = 120;
 const STARTING_WAIT_INTERVAL_MS = 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
-const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 120000;
-const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 20000;
+const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 180000;
+const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 30000;
 const DEFAULT_TOOL_TIMEOUT_MS = 600000;
 
 const OPENCODE_BASENAME = 'opencode';
@@ -753,13 +753,23 @@ export function createApp(config) {
             (async () => {
                 try {
                     for await (const event of eventStream) {
+                        const eventSessionId = event?.properties?.part?.sessionID || event?.properties?.info?.sessionID;
+                        const isTargetSession = eventSessionId === sessionId || !eventSessionId;
+                        
                         logDebug('SSE event received', {
                             type: event?.type,
-                            sessionId: event?.properties?.part?.sessionID || event?.properties?.info?.sessionID,
+                            eventSessionId,
+                            targetSessionId: sessionId,
+                            isTargetSession,
                             hasDelta: Boolean(event?.properties?.delta),
                             deltaLen: event?.properties?.delta?.length || 0,
                             partType: event?.properties?.part?.type
                         });
+                        
+                        if (!isTargetSession) {
+                            logDebug('Ignoring event for different session', { eventSessionId, targetSessionId: sessionId });
+                            continue;
+                        }
                         
                         if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
                             const { part, delta } = event.properties;
@@ -1106,7 +1116,7 @@ export function createApp(config) {
 
                         let collected = null;
                         let promptSent = false;
-                        const sendPromptWithRetry = async (retries = 2) => {
+                        const sendPromptWithRetry = async (retries = 3) => {
                             for (let i = 0; i <= retries; i++) {
                                 try {
                                     await client.session.prompt(promptParams);
@@ -1114,24 +1124,36 @@ export function createApp(config) {
                                     logDebug('Prompt sent successfully', { sessionId, attempt: i + 1 });
                                     return;
                                 } catch (err) {
-                                    logDebug('Prompt attempt failed', { sessionId, attempt: i + 1, error: err.message });
-                                    if (i < retries) {
-                                        await sleep(1000 * (i + 1));
+                                    logDebug('Prompt attempt failed', { 
+                                        sessionId, 
+                                        attempt: i + 1, 
+                                        error: err.message,
+                                        retryable: err.message.includes('timeout') || err.message.includes('network') || err.message.includes('terminated')
+                                    });
+                                    if (i < retries && (err.message.includes('timeout') || err.message.includes('network') || err.message.includes('terminated'))) {
+                                        await sleep(1500 * (i + 1));
+                                    } else {
+                                        throw err;
                                     }
                                 }
                             }
                         };
-                        try {
-                            const collectPromise = collectFromEvents(
+
+                        const waitForPromptAndCollect = async () => {
+                            await sendPromptWithRetry();
+                            await sleep(500);
+                            return collectFromEvents(
                                 sessionId,
                                 REQUEST_TIMEOUT_MS,
                                 sendDelta,
                                 DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS,
                                 DEFAULT_EVENT_IDLE_TIMEOUT_MS
                             );
+                        };
+
+                        try {
+                            const collectPromise = waitForPromptAndCollect();
                             const safeCollect = collectPromise.catch((err) => ({ __error: err }));
-                            const promptStart = Date.now();
-                            sendPromptWithRetry().catch(err => logDebug('Prompt error:', err.message));
                             collected = await safeCollect;
                         } catch (e) {
                             logDebug('Stream error:', e.message);
