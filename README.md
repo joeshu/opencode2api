@@ -30,7 +30,7 @@
 
 ```bash
 # 1. 克隆并配置
-git clone https://github.com/TiaraBasori/opencode2api.git
+git clone https://github.com/joeshu/opencode2api.git
 cd opencode2api
 cp .env.example .env
 
