@@ -1063,60 +1063,65 @@ export function createApp(config) {
                         };
                         ensureKeepalive();
 
-                        const sendDelta = (delta, isReasoning = false) => {
-                            if (clientDisconnected) return;
-                            if (!delta || typeof delta !== 'string') return;
-                            const trimmed = delta.trim();
-                            if (!trimmed) return;
-                            if (!res.writable) {
-                                clientDisconnected = true;
-                                return;
-                            }
-                            const filtered = isReasoning ? filterReasoningDelta(delta) : filterContentDelta(delta);
-                            if (!filtered) return;
-                            if (isReasoning) {
-                                if (!insideReasoning) {
-                                    res.write(`data: ${JSON.stringify({
-                                        id,
-                                        object: 'chat.completion.chunk',
-                                        created: Math.floor(Date.now() / 1000),
-                                        model: `${pID}/${mID}`,
-                                        choices: [{
-                                            index: 0,
-                                            delta: { content: '<think>\n' },
-                                            finish_reason: null
-                                        }]
-                                    })}\n\n`);
-                                    insideReasoning = true;
+const sendDelta = (delta, isReasoning = false) => {
+                            try {
+                                if (clientDisconnected) return;
+                                if (!delta || typeof delta !== 'string') return;
+                                const trimmed = delta.trim();
+                                if (!trimmed) return;
+                                if (!res.writable) {
+                                    clientDisconnected = true;
+                                    return;
                                 }
-                                streamedReasoning += filtered;
-                                reasoningTokens += Math.ceil(filtered.length / 4);
-                            } else {
-                                if (insideReasoning) {
-                                    res.write(`data: ${JSON.stringify({
-                                        id,
-                                        object: 'chat.completion.chunk',
-                                        created: Math.floor(Date.now() / 1000),
-                                        model: `${pID}/${mID}`,
-                                        choices: [{
-                                            index: 0,
-                                            delta: { content: '\n</think>\n\n' },
-                                            finish_reason: null
-                                        }]
-                                    })}\n\n`);
-                                    insideReasoning = false;
+                                const filtered = isReasoning ? filterReasoningDelta(delta) : filterContentDelta(delta);
+                                if (!filtered) return;
+                                
+                                if (isReasoning) {
+                                    if (!insideReasoning) {
+                                        res.write(`data: ${JSON.stringify({
+                                            id,
+                                            object: 'chat.completion.chunk',
+                                            created: Math.floor(Date.now() / 1000),
+                                            model: `${pID}/${mID}`,
+                                            choices: [{
+                                                index: 0,
+                                                delta: { content: '<think>\n' },
+                                                finish_reason: null
+                                            }]
+                                        })}\n\n`);
+                                        insideReasoning = true;
+                                    }
+                                    streamedReasoning += filtered;
+                                    reasoningTokens += Math.ceil(filtered.length / 4);
+                                } else {
+                                    if (insideReasoning) {
+                                        res.write(`data: ${JSON.stringify({
+                                            id,
+                                            object: 'chat.completion.chunk',
+                                            created: Math.floor(Date.now() / 1000),
+                                            model: `${pID}/${mID}`,
+                                            choices: [{
+                                                index: 0,
+                                                delta: { content: '\n</think>\n\n' },
+                                                finish_reason: null
+                                            }]
+                                        })}\n\n`);
+                                        insideReasoning = false;
+                                    }
+                                    streamedContent += filtered;
+                                    completionTokens += Math.ceil(filtered.length / 4);
                                 }
-                                streamedContent += filtered;
-                                completionTokens += Math.ceil(filtered.length / 4);
+                                const chunk = {
+                                    id,
+                                    object: 'chat.completion.chunk',
+                                    created: Math.floor(Date.now() / 1000),
+                                    model: `${pID}/${mID}`,
+                                    choices: [{ index: 0, delta: { content: filtered }, finish_reason: null }]
+                                };
+                                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                            } catch (e) {
+                                console.error('[Proxy] sendDelta error:', e.message);
                             }
-                            const chunk = {
-                                id,
-                                object: 'chat.completion.chunk',
-                                created: Math.floor(Date.now() / 1000),
-                                model: `${pID}/${mID}`,
-                                choices: [{ index: 0, delta: { content: filtered }, finish_reason: null }]
-                            };
-                            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         };
 
                         let clientDisconnected = false;
@@ -1284,7 +1289,7 @@ export function createApp(config) {
                             }
                         })}\n\n`);
                         res.write('data: [DONE]\n\n');
-                        res.end();
+                        if (!res.destroyed) res.end();
                     } else {
                         const promptStart = Date.now();
                         await promptWithTimeout(promptParams, REQUEST_TIMEOUT_MS);
