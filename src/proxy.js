@@ -808,8 +808,18 @@ export function createApp(config) {
                                     ms: Date.now() - startedAt,
                                     deltaChars,
                                     finalContentLen: content.length,
-                                    finalReasoningLen: reasoning.length
+                                    finalReasoningLen: reasoning.length,
+                                    hasReceivedDelta: receivedDelta
                                 });
+                                
+                                if (!receivedDelta && (content || reasoning)) {
+                                    logDebug('SSE completed but no delta received, will use collected content', {
+                                        sessionId,
+                                        contentLen: content.length,
+                                        reasoningLen: reasoning.length
+                                    });
+                                }
+                                
                                 resolve({ content, reasoning });
                             }
                             break;
@@ -1220,11 +1230,16 @@ export function createApp(config) {
                                 logDebug('Client disconnected, skipping remaining delta', { sessionId });
                                 return;
                             }
+                            logDebug('Using collected content from SSE (no deltas received)', {
+                                sessionId,
+                                contentLen: collected.content?.length || 0,
+                                reasoningLen: collected.reasoning?.length || 0
+                            });
                             if (collected.reasoning) sendDelta(collected.reasoning, true);
                             if (collected.content) sendDelta(collected.content, false);
                         }
 
-                        if (!streamedContent && !streamedReasoning) {
+                        if (!streamedContent && !streamedReasoning && (!collected || (!collected.content && !collected.reasoning))) {
                             if (clientDisconnected) {
                                 logDebug('Client disconnected before fallback', { sessionId });
                                 return;
