@@ -62,8 +62,8 @@ const STARTING_WAIT_ITERATIONS = 120;
 const STARTING_WAIT_INTERVAL_MS = 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
-const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 60000;
-const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 8000;
+const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 120000;
+const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 15000;
 
 const OPENCODE_BASENAME = 'opencode';
 
@@ -713,6 +713,14 @@ export function createApp(config) {
             (async () => {
                 try {
                     for await (const event of eventStream) {
+                        logDebug('SSE event received', {
+                            type: event?.type,
+                            sessionId: event?.properties?.part?.sessionID || event?.properties?.info?.sessionID,
+                            hasDelta: Boolean(event?.properties?.delta),
+                            deltaLen: event?.properties?.delta?.length || 0,
+                            partType: event?.properties?.part?.type
+                        });
+                        
                         if (event.type === 'message.part.updated' && event.properties.part.sessionID === sessionId) {
                             const { part, delta } = event.properties;
                             if (delta) {
@@ -748,7 +756,9 @@ export function createApp(config) {
                                 logDebug('SSE completed', {
                                     sessionId,
                                     ms: Date.now() - startedAt,
-                                    deltaChars
+                                    deltaChars,
+                                    finalContentLen: content.length,
+                                    finalReasoningLen: reasoning.length
                                 });
                                 resolve({ content, reasoning });
                             }
@@ -756,6 +766,7 @@ export function createApp(config) {
                         }
                     }
                 } catch (e) {
+                    logDebug('SSE stream error', { error: e.message, sessionId });
                     if (!finished) {
                         finished = true;
                         clearTimeout(timeoutId);
@@ -986,7 +997,9 @@ export function createApp(config) {
                         ensureKeepalive();
 
                         const sendDelta = (delta, isReasoning = false) => {
-                            if (!delta) return;
+                            if (!delta || typeof delta !== 'string') return;
+                            const trimmed = delta.trim();
+                            if (!trimmed) return;
                             const filtered = isReasoning ? filterReasoningDelta(delta) : filterContentDelta(delta);
                             if (!filtered) return;
                             if (isReasoning) {
@@ -1102,15 +1115,32 @@ export function createApp(config) {
 
                         if (!streamedContent && !streamedReasoning) {
                             logDebug('SSE returned empty, falling back to polling', { sessionId });
-                            const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
-                            if (error && !content && !reasoning) {
-                                sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
-                            } else {
-                                const safeReasoning = stripFunctionCalls(reasoning, false);
-                                const safeContent = stripFunctionCalls(content, false);
-                                if (safeReasoning) sendDelta(safeReasoning, true);
-                                if (safeContent) sendDelta(safeContent, false);
+                            try {
+                                const pollResult = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
+                                const { content: pollContent, reasoning: pollReasoning, error } = pollResult;
+                                if (error && !pollContent && !pollReasoning) {
+                                    sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
+                                } else {
+                                    const safeReasoning = stripFunctionCalls(pollReasoning || '', false);
+                                    const safeContent = stripFunctionCalls(pollContent || '', false);
+                                    logDebug('Polling fallback result', {
+                                        sessionId,
+                                        contentLen: safeContent.length,
+                                        reasoningLen: safeReasoning.length
+                                    });
+                                    if (safeReasoning) sendDelta(safeReasoning, true);
+                                    if (safeContent) sendDelta(safeContent, false);
+                                }
+                            } catch (pollError) {
+                                logDebug('Polling fallback error', { sessionId, error: pollError.message });
+                                sendDelta(`[Proxy Error] Polling failed: ${pollError.message}`);
                             }
+                        } else if (streamedContent || streamedReasoning) {
+                            logDebug('SSE stream completed', {
+                                sessionId,
+                                streamedContentLen: streamedContent.length,
+                                streamedReasoningLen: streamedReasoning.length
+                            });
                         }
 
                         if (insideReasoning) {
