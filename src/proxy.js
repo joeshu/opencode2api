@@ -753,18 +753,22 @@ export function createApp(config) {
 
             (async () => {
                 try {
+                    let eventCount = 0;
                     for await (const event of eventStream) {
+                        eventCount++;
                         const eventSessionId = event?.properties?.part?.sessionID || event?.properties?.info?.sessionID;
                         const isTargetSession = eventSessionId === sessionId || !eventSessionId;
                         
                         logDebug('SSE event received', {
+                            eventNum: eventCount,
                             type: event?.type,
                             eventSessionId,
                             targetSessionId: sessionId,
                             isTargetSession,
                             hasDelta: Boolean(event?.properties?.delta),
                             deltaLen: event?.properties?.delta?.length || 0,
-                            partType: event?.properties?.part?.type
+                            partType: event?.properties?.part?.type,
+                            hasInfo: Boolean(event?.properties?.info)
                         });
                         
                         if (!isTargetSession) {
@@ -1170,6 +1174,8 @@ export function createApp(config) {
                             logDebug('Stream error:', e.message);
                         }
 
+                        const collectedHasContent = collected && (collected.content || collected.reasoning);
+                        
                         if (collected && collected.__error) {
                             if (clientDisconnected) {
                                 logDebug('Client disconnected before fallback', { sessionId });
@@ -1188,45 +1194,7 @@ export function createApp(config) {
                                 if (safeReasoning) sendDelta(safeReasoning, true);
                                 if (safeContent) sendDelta(safeContent, false);
                             }
-                        } else if (collected && collected.noData) {
-                            if (clientDisconnected) {
-                                logDebug('Client disconnected before fallback', { sessionId });
-                                return;
-                            }
-                            logDebug('Fallback to polling (stream)', { sessionId });
-                            const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
-                            if (error && !content && !reasoning) {
-                                sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
-                            } else {
-                                const safeReasoning = stripFunctionCalls(reasoning, false);
-                                const safeContent = stripFunctionCalls(content, false);
-                                if (safeReasoning) sendDelta(safeReasoning, true);
-                                if (safeContent) sendDelta(safeContent, false);
-                            }
-                        } else if (collected && collected.idleTimeout) {
-                            if (clientDisconnected) {
-                                logDebug('Client disconnected before fallback', { sessionId });
-                                return;
-                            }
-                            logDebug('SSE idle timeout, polling for completion', { sessionId });
-                            const { content, reasoning, error } = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
-                            if (error && !content && !reasoning) {
-                                sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
-                            } else {
-                                const safeReasoning = stripFunctionCalls(reasoning, false);
-                                const safeContent = stripFunctionCalls(content, false);
-                                const remainingReasoning = safeReasoning && safeReasoning.startsWith(streamedReasoning)
-                                    ? safeReasoning.slice(streamedReasoning.length)
-                                    : safeReasoning;
-                                const remainingContent = safeContent && safeContent.startsWith(streamedContent)
-                                    ? safeContent.slice(streamedContent.length)
-                                    : safeContent;
-                                if (remainingReasoning) sendDelta(remainingReasoning, true);
-                                if (remainingContent) sendDelta(remainingContent, false);
-                            }
-                        }
-
-                        if (collected && !streamedContent && !streamedReasoning && (collected.reasoning || collected.content)) {
+                        } else if (collectedHasContent && !streamedContent && !streamedReasoning) {
                             if (clientDisconnected) {
                                 logDebug('Client disconnected, skipping remaining delta', { sessionId });
                                 return;
@@ -1238,14 +1206,12 @@ export function createApp(config) {
                             });
                             if (collected.reasoning) sendDelta(collected.reasoning, true);
                             if (collected.content) sendDelta(collected.content, false);
-                        }
-
-                        if (!streamedContent && !streamedReasoning && (!collected || (!collected.content && !collected.reasoning))) {
+                        } else if (!streamedContent && !streamedReasoning) {
                             if (clientDisconnected) {
                                 logDebug('Client disconnected before fallback', { sessionId });
                                 return;
                             }
-                            logDebug('SSE returned empty, falling back to polling', { sessionId });
+                            logDebug('No streamed content, falling back to polling', { sessionId });
                             try {
                                 const pollResult = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
                                 const { content: pollContent, reasoning: pollReasoning, error } = pollResult;
@@ -1267,7 +1233,7 @@ export function createApp(config) {
                                 sendDelta(`[Proxy Error] Polling failed: ${pollError.message}`);
                             }
                         } else if (streamedContent || streamedReasoning) {
-                            logDebug('SSE stream completed', {
+                            logDebug('SSE stream completed with deltas', {
                                 sessionId,
                                 streamedContentLen: streamedContent.length,
                                 streamedReasoningLen: streamedReasoning.length
