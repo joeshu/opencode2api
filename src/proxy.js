@@ -639,6 +639,39 @@ export function createApp(config) {
         const pollStart = Date.now();
         const startedAt = Date.now();
         while (Date.now() - startedAt < timeoutMs) {
+            try {
+                const messagesRes = await client.session.messages({ path: { id: sessionId } });
+                const messages = messagesRes?.data || messagesRes || [];
+                if (Array.isArray(messages) && messages.length) {
+                    for (let i = messages.length - 1; i >= 0; i -= 1) {
+                        const entry = messages[i];
+                        const info = entry?.info;
+                        if (info?.role !== 'assistant') continue;
+                        const { content, reasoning } = extractFromParts(entry?.parts || []);
+                        const error = info?.error || null;
+                        const done = Boolean(info.finish || info.time?.completed || error);
+                        if (done || content || reasoning) {
+                            if (error) {
+                                console.error('[Proxy] OpenCode assistant error:', error);
+                            }
+                            logDebug('Polling completed', {
+                                sessionId,
+                                ms: Date.now() - pollStart,
+                                done,
+                                contentLen: content.length,
+                                reasoningLen: reasoning.length,
+                                error: error ? error.name : null
+                            });
+                            return { content, reasoning, error };
+                        }
+                    }
+                }
+            } catch (pollErr) {
+                logDebug('Poll error, continuing', { sessionId, error: pollErr.message });
+            }
+            await sleep(intervalMs);
+        }
+        try {
             const messagesRes = await client.session.messages({ path: { id: sessionId } });
             const messages = messagesRes?.data || messagesRes || [];
             if (Array.isArray(messages) && messages.length) {
@@ -647,25 +680,19 @@ export function createApp(config) {
                     const info = entry?.info;
                     if (info?.role !== 'assistant') continue;
                     const { content, reasoning } = extractFromParts(entry?.parts || []);
-                    const error = info?.error || null;
-                    const done = Boolean(info.finish || info.time?.completed || error);
-                    if (done || content || reasoning) {
-                        if (error) {
-                            console.error('[Proxy] OpenCode assistant error:', error);
-                        }
-                        logDebug('Polling completed', {
+                    if (content || reasoning) {
+                        logDebug('Polling timeout but returning partial data', {
                             sessionId,
-                            ms: Date.now() - pollStart,
-                            done,
                             contentLen: content.length,
                             reasoningLen: reasoning.length,
-                            error: error ? error.name : null
+                            ms: Date.now() - startedAt
                         });
-                        return { content, reasoning, error };
+                        return { content, reasoning, error: null, partial: true };
                     }
                 }
             }
-            await sleep(intervalMs);
+        } catch (e) {
+            logDebug('Final polling attempt failed', { sessionId, error: e.message });
         }
         logDebug('Polling timeout', { sessionId, ms: Date.now() - pollStart });
         throw new Error(`Request timeout after ${timeoutMs}ms`);
@@ -1078,6 +1105,22 @@ export function createApp(config) {
                         });
 
                         let collected = null;
+                        let promptSent = false;
+                        const sendPromptWithRetry = async (retries = 2) => {
+                            for (let i = 0; i <= retries; i++) {
+                                try {
+                                    await client.session.prompt(promptParams);
+                                    promptSent = true;
+                                    logDebug('Prompt sent successfully', { sessionId, attempt: i + 1 });
+                                    return;
+                                } catch (err) {
+                                    logDebug('Prompt attempt failed', { sessionId, attempt: i + 1, error: err.message });
+                                    if (i < retries) {
+                                        await sleep(1000 * (i + 1));
+                                    }
+                                }
+                            }
+                        };
                         try {
                             const collectPromise = collectFromEvents(
                                 sessionId,
@@ -1088,7 +1131,7 @@ export function createApp(config) {
                             );
                             const safeCollect = collectPromise.catch((err) => ({ __error: err }));
                             const promptStart = Date.now();
-                            client.session.prompt(promptParams).catch(err => logDebug('Prompt error:', err.message));
+                            sendPromptWithRetry().catch(err => logDebug('Prompt error:', err.message));
                             collected = await safeCollect;
                         } catch (e) {
                             logDebug('Stream error:', e.message);
