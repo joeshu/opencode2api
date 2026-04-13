@@ -29,6 +29,7 @@ services:
       - opencode-data:/home/node/.local/share/opencode
       - opencode-config:/home/node/.config/opencode
       - .:/home/node/project
+      - /home/node/project/node_modules  # 关键：添加这行，保护容器内的 node_modules 不被挂载覆盖
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${OPENCODE_PROXY_PORT:-10000}/health"]
