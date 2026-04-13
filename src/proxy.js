@@ -58,6 +58,7 @@ let isProcessing = false;
 
 const STARTUP_WAIT_ITERATIONS = 60;
 const STARTUP_WAIT_INTERVAL_MS = 2000;
+const DEFAULT_STARTUP_WAIT_MS = STARTUP_WAIT_ITERATIONS * STARTUP_WAIT_INTERVAL_MS;
 const STARTING_WAIT_ITERATIONS = 120;
 const STARTING_WAIT_INTERVAL_MS = 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300000;
@@ -1904,7 +1905,8 @@ async function ensureBackend(config) {
         await checkHealth(OPENCODE_SERVER_URL, OPENCODE_SERVER_PASSWORD);
     } catch (err) {
         if (!MANAGE_BACKEND) {
-            for (let i = 0; i < STARTUP_WAIT_ITERATIONS; i++) {
+            const iterations = Math.ceil(STARTUP_WAIT_MS / STARTUP_WAIT_INTERVAL_MS);
+            for (let i = 0; i < iterations; i++) {
                 await new Promise(r => setTimeout(r, STARTUP_WAIT_INTERVAL_MS));
                 try {
                     await checkHealth(OPENCODE_SERVER_URL, OPENCODE_SERVER_PASSWORD);
@@ -2045,7 +2047,8 @@ async function ensureBackend(config) {
 
         // Wait for backend to be ready
         let started = false;
-        for (let i = 0; i < STARTUP_WAIT_ITERATIONS; i++) {
+        const iterations = Math.ceil(STARTUP_WAIT_MS / STARTUP_WAIT_INTERVAL_MS);
+        for (let i = 0; i < iterations; i++) {
             await new Promise(r => setTimeout(r, STARTUP_WAIT_INTERVAL_MS));
             try {
                 await checkHealth(OPENCODE_SERVER_URL, OPENCODE_SERVER_PASSWORD);
@@ -2103,6 +2106,7 @@ export function startProxy(options) {
             String(process.env.OPENCODE_USE_ISOLATED_HOME || '').toLowerCase() === 'true' ||
             process.env.OPENCODE_USE_ISOLATED_HOME === '1',
         REQUEST_TIMEOUT_MS: Number(options.REQUEST_TIMEOUT_MS || process.env.OPENCODE_PROXY_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS),
+        STARTUP_WAIT_MS: Number(options.STARTUP_WAIT_MS || process.env.OPENCODE_SERVER_STARTUP_WAIT_MS || DEFAULT_STARTUP_WAIT_MS),
         MANAGE_BACKEND: normalizeBool(options.MANAGE_BACKEND) ??
             normalizeBool(process.env.OPENCODE_PROXY_MANAGE_BACKEND) ??
             true,
