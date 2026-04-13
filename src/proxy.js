@@ -854,7 +854,6 @@ export function createApp(config) {
 
     // Chat completions endpoint
     app.post('/v1/chat/completions', async (req, res) => {
-        console.log('[Proxy] Received chat/completions request');
         try {
             await lock(async () => {
                 let sessionId = null;
@@ -868,7 +867,7 @@ export function createApp(config) {
 
                 try {
                     const { messages, model, stream: requestStream, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, stop, reasoning_effort, reasoning } = req.body;
-                    console.log('[Proxy] Request body parsed:', { model, stream: Boolean(requestStream), hasMessages: Array.isArray(messages) ? messages.length : 0 });
+                    stream = Boolean(requestStream);
                     if (!messages || !Array.isArray(messages) || messages.length === 0) {
                         return res.status(400).json({ error: { message: 'messages array is required' } });
                     }
