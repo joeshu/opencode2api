@@ -56,6 +56,21 @@ async function getImageDataUri(url) {
 const queue = [];
 let isProcessing = false;
 
+// Session caching to reduce "Session not found" errors
+const sessionCache = new Map();
+const SESSION_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Metrics for monitoring
+const metrics = {
+    requestsTotal: 0,
+    requestsSuccess: 0,
+    requestsError: 0,
+    sessionCacheHits: 0,
+    sessionCacheMisses: 0,
+    activeRequests: 0,
+    startTime: Date.now()
+};
+
 const STARTUP_WAIT_ITERATIONS = 60;
 const STARTUP_WAIT_INTERVAL_MS = 2000;
 const DEFAULT_STARTUP_WAIT_MS = STARTUP_WAIT_ITERATIONS * STARTUP_WAIT_INTERVAL_MS;
@@ -82,6 +97,41 @@ function splitPathEnv() {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Session cache management
+function getCachedSession(key) {
+    const cached = sessionCache.get(key);
+    if (!cached) {
+        metrics.sessionCacheMisses++;
+        return null;
+    }
+    
+    if (Date.now() - cached.timestamp > SESSION_CACHE_TTL) {
+        sessionCache.delete(key);
+        metrics.sessionCacheMisses++;
+        return null;
+    }
+    
+    metrics.sessionCacheHits++;
+    return cached.sessionId;
+}
+
+function setCachedSession(key, sessionId) {
+    sessionCache.set(key, {
+        sessionId,
+        timestamp: Date.now()
+    });
+    
+    // Cleanup old entries periodically
+    if (sessionCache.size > 100) {
+        const now = Date.now();
+        for (const [k, v] of sessionCache.entries()) {
+            if (now - v.timestamp > SESSION_CACHE_TTL) {
+                sessionCache.delete(k);
+            }
+        }
+    }
 }
 
 function pushDir(list, dir) {
@@ -869,6 +919,7 @@ export function createApp(config) {
             return res.status(503).json({ error: { message: 'Server busy, try again later' } });
         }
         activeRequests++;
+        metrics.requestsTotal++;
         try {
             await lock(async () => {
                 let sessionId = null;
@@ -1013,25 +1064,50 @@ export function createApp(config) {
                         disableTools: DISABLE_TOOLS
                     });
 
-                    // Ensure backend is running
-                    await ensureBackend(config);
+// Ensure backend is running
+             await ensureBackend(config);
 
-                    // Set active model
-                    try {
-                        await client.config.update({
-                            body: {
-                                activeModel: { providerID: pID, modelID: mID }
-                            }
-                        });
-                    } catch (confError) {
-                        logDebug('Failed to set active model:', confError.message);
-                    }
+             try {
+                 await client.config.update({
+                     body: { activeModel: { providerID: pID, modelID: mID } }
+                 });
+             } catch (e) { }
 
-                    // Create session
-                    const sessionRes = await client.session.create();
-                    sessionId = sessionRes.data?.id;
-                    if (!sessionId) throw new Error('Failed to create OpenCode session');
-                    logDebug('Session created', { sessionId });
+             // Try to reuse session to reduce "Session not found" errors
+             const sessionCacheKey = `${pID}:${mID}:${JSON.stringify({system: !!instructions, tools: !!tools})}`;
+             sessionId = getCachedSession(sessionCacheKey);
+             let sessionCreated = false;
+             
+             if (!sessionId) {
+                 const sessionRes = await client.session.create();
+                 sessionId = sessionRes.data?.id;
+                 if (!sessionId) throw new Error('Failed to create OpenCode session');
+                 setCachedSession(sessionCacheKey, sessionId);
+                 sessionCreated = true;
+                 logDebug('Session created', { sessionId });
+             } else {
+                 logDebug('Session reused from cache', { sessionId });
+             }
+                         });
+                     } catch (confError) {
+                         logDebug('Failed to set active model:', confError.message);
+                     }
+
+                     // Try to reuse session to reduce "Session not found" errors
+                     const sessionCacheKey = `${pID}:${mID}:${JSON.stringify({systemMsg, tools: !!toolOverrides})}`;
+                     sessionId = getCachedSession(sessionCacheKey);
+                     let sessionCreated = false;
+                     
+                     if (!sessionId) {
+                         const sessionRes = await client.session.create();
+                         sessionId = sessionRes.data?.id;
+                         if (!sessionId) throw new Error('Failed to create OpenCode session');
+                         setCachedSession(sessionCacheKey, sessionId);
+                         sessionCreated = true;
+                         logDebug('Session created', { sessionId });
+                     } else {
+                         logDebug('Session reused from cache', { sessionId });
+                     }
 
                     id = `chatcmpl-${Date.now()}`;
                     insideReasoning = false;
@@ -1433,7 +1509,8 @@ const sendDelta = (delta, isReasoning = false) => {
         status: 'ok',
         proxy: true,
         activeRequests,
-        maxConcurrent: MAX_CONCURRENT_REQUESTS
+        maxConcurrent: MAX_CONCURRENT_REQUESTS,
+        metrics: metrics
     }));
 
     app.post('/v1/responses', async (req, res) => {
