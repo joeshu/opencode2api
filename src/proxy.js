@@ -879,7 +879,7 @@ export function createApp(config) {
 
                 try {
                     const { messages, model, stream: requestStream, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, stop, reasoning_effort, reasoning } = req.body;
-                    stream = Boolean(requestStream) && !FORCE_NO_STREAM;
+                    stream = Boolean(requestStream) && !(FORCE_NO_STREAM || DISABLE_SSE);
                     if (FORCE_NO_STREAM && requestStream) {
                         console.log('[Proxy] Forced non-stream mode');
                     }
@@ -2105,7 +2105,10 @@ export function startProxy(options) {
         STARTUP_WAIT_MS: Number(options.STARTUP_WAIT_MS || process.env.OPENCODE_SERVER_STARTUP_WAIT_MS || DEFAULT_STARTUP_WAIT_MS),
         FORCE_NO_STREAM: normalizeBool(options.FORCE_NO_STREAM) ??
             normalizeBool(process.env.OPENCODE_PROXY_FORCE_NO_STREAM) ??
-            (!disableTools),
+            true,
+        DISABLE_SSE: normalizeBool(options.DISABLE_SSE) ??
+            normalizeBool(process.env.OPENCODE_PROXY_DISABLE_SSE) ??
+            true,
         MANAGE_BACKEND: normalizeBool(options.MANAGE_BACKEND) ??
             normalizeBool(process.env.OPENCODE_PROXY_MANAGE_BACKEND) ??
             true,
