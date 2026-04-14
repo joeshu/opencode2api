@@ -64,7 +64,7 @@ const STARTING_WAIT_INTERVAL_MS = 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 180000;
-const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 30000;
+const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 60000;
 const DEFAULT_TOOL_TIMEOUT_MS = 600000;
 
 const OPENCODE_BASENAME = 'opencode';
@@ -867,7 +867,10 @@ export function createApp(config) {
 
                 try {
                     const { messages, model, stream: requestStream, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, stop, reasoning_effort, reasoning } = req.body;
-                    stream = Boolean(requestStream);
+                    stream = Boolean(requestStream) && !FORCE_NO_STREAM;
+                    if (FORCE_NO_STREAM && requestStream) {
+                        console.log('[Proxy] Forced non-stream mode');
+                    }
                     if (!messages || !Array.isArray(messages) || messages.length === 0) {
                         return res.status(400).json({ error: { message: 'messages array is required' } });
                     }
@@ -2084,6 +2087,9 @@ export function startProxy(options) {
             process.env.OPENCODE_USE_ISOLATED_HOME === '1',
         REQUEST_TIMEOUT_MS: Number(options.REQUEST_TIMEOUT_MS || process.env.OPENCODE_PROXY_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS),
         STARTUP_WAIT_MS: Number(options.STARTUP_WAIT_MS || process.env.OPENCODE_SERVER_STARTUP_WAIT_MS || DEFAULT_STARTUP_WAIT_MS),
+        FORCE_NO_STREAM: normalizeBool(options.FORCE_NO_STREAM) ??
+            normalizeBool(process.env.OPENCODE_PROXY_FORCE_NO_STREAM) ??
+            (!disableTools),
         MANAGE_BACKEND: normalizeBool(options.MANAGE_BACKEND) ??
             normalizeBool(process.env.OPENCODE_PROXY_MANAGE_BACKEND) ??
             true,
