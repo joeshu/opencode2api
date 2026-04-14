@@ -1057,7 +1057,7 @@ export function createApp(config) {
                     res.setHeader('Cache-Control', 'no-cache');
                     res.setHeader('Connection', 'keep-alive');
 
-                    if (stream) {
+if (useStream) {
                         const filterContentDelta = createToolCallFilter();
                         const filterReasoningDelta = createToolCallFilter();
                         let streamedContent = '';
@@ -1443,6 +1443,8 @@ const sendDelta = (delta, isReasoning = false) => {
                 messages: chatMessages,
                 prompt
             } = req.body;
+            
+            const useStream = stream && !(FORCE_NO_STREAM || DISABLE_SSE);
 
             const reasoningLevel = normalizeReasoningEffort(
                 reasoning_effort || requestReasoning?.effort,
