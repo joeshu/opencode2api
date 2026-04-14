@@ -1061,7 +1061,7 @@ export function createApp(config) {
                                     if (!res.destroyed && res.writable) {
                                         res.write(': keepalive\n\n');
                                     }
-                                }, 10000);
+                                }, 5000);
                             }
                         };
                         ensureKeepalive();
