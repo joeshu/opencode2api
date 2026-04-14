@@ -66,6 +66,7 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 180000;
 const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 60000;
 const DEFAULT_TOOL_TIMEOUT_MS = 600000;
+const DEFAULT_TOOL_POLL_INTERVAL_MS = 2000;
 
 // Health check & rate limiting
 const MAX_CONCURRENT_REQUESTS = 3;
@@ -641,7 +642,7 @@ export function createApp(config) {
         return { content, reasoning };
     }
 
-    async function pollForAssistantResponse(sessionId, timeoutMs, intervalMs = DEFAULT_POLL_INTERVAL_MS) {
+    async function pollForAssistantResponse(sessionId, timeoutMs, intervalMs = DEFAULT_POLL_INTERVAL_MS, toolTimeoutMs = TOOL_TIMEOUT_MS) {
         const pollStart = Date.now();
         const startedAt = Date.now();
         while (Date.now() - startedAt < timeoutMs) {
@@ -675,7 +676,9 @@ export function createApp(config) {
             } catch (pollErr) {
                 logDebug('Poll error, continuing', { sessionId, error: pollErr.message });
             }
-            await sleep(intervalMs);
+            // Use shorter interval when tools might be executing
+            const pollInterval = toolsBeingUsed ? Math.min(intervalMs, 1000) : intervalMs;
+            await sleep(pollInterval);
         }
         try {
             const messagesRes = await client.session.messages({ path: { id: sessionId } });
@@ -1048,10 +1051,7 @@ export function createApp(config) {
                             ...(requestParams.stop && { stop: requestParams.stop })
                         }
                     };
-                    const toolOverrides = await getToolOverrides();
-                    if (toolOverrides && Object.keys(toolOverrides).length > 0) {
-                        promptParams.body.tools = toolOverrides;
-                    }
+// Tool detection will happen later after we have the toolOverrides
 
                     res.setHeader('Content-Type', stream ? 'text/event-stream' : 'application/json');
                     res.setHeader('Cache-Control', 'no-cache');
@@ -1132,7 +1132,17 @@ const sendDelta = (delta, isReasoning = false) => {
                                     created: Math.floor(Date.now() / 1000),
                                     model: `${pID}/${mID}`,
                                     choices: [{ index: 0, delta: { content: filtered }, finish_reason: null }]
-                                };
+            };
+
+            // Detect if tools are being used for timeout adjustment
+            const toolOverrides = await getToolOverrides();
+            if (toolOverrides && Object.keys(toolOverrides).length > 0) {
+                promptParams.body = {
+                    ...promptParams.body,
+                    tools: toolOverrides
+                };
+                toolsBeingUsed = Object.values(toolOverrides).some(v => v === false);
+            }
                                 res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                             } catch (e) {
                                 console.error('[Proxy] sendDelta error:', e.message);
@@ -1228,37 +1238,37 @@ const sendDelta = (delta, isReasoning = false) => {
                             });
                             if (collected.reasoning) sendDelta(collected.reasoning, true);
                             if (collected.content) sendDelta(collected.content, false);
-                        } else                         if (!streamedContent && !streamedReasoning) {
-                            if (clientDisconnected) {
-                                logDebug('Client disconnected before fallback', { sessionId });
-                                return;
-                            }
-                            logDebug('No streamed content, polling for response', { sessionId });
-                            try {
-                                const pollResult = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS);
-                                const { content: pollContent, reasoning: pollReasoning, error, partial } = pollResult;
-                                if (error && !pollContent && !pollReasoning) {
-                                    sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
-                                } else if (pollContent || pollReasoning) {
-                                    const safeReasoning = stripFunctionCalls(pollReasoning || '', false);
-                                    const safeContent = stripFunctionCalls(pollContent || '', false);
-                                    logDebug('Polling fallback result', {
-                                        sessionId,
-                                        contentLen: safeContent.length,
-                                        reasoningLen: safeReasoning.length,
-                                        isPartial: partial,
-                                        done: !partial
-                                    });
-                                    if (safeReasoning) sendDelta(safeReasoning, true);
-                                    if (safeContent) sendDelta(safeContent, false);
-                                } else {
-                                    sendDelta('[Proxy Error] No response content received');
-                                }
-                            } catch (pollError) {
-                                logDebug('Polling fallback error', { sessionId, error: pollError.message });
-                                sendDelta(`[Proxy Error] Polling failed: ${pollError.message}`);
-                            }
-                        } else if (streamedContent || streamedReasoning) {
+                         } else if (!streamedContent && !streamedReasoning) {
+                             if (clientDisconnected) {
+                                 logDebug('Client disconnected before fallback', { sessionId });
+                                 return;
+                             }
+                             logDebug('No streamed content, polling for response', { sessionId });
+                             try {
+                                 const pollResult = await pollForAssistantResponse(sessionId, REQUEST_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, TOOL_TIMEOUT_MS);
+                                 const { content: pollContent, reasoning: pollReasoning, error, partial } = pollResult;
+                                 if (error && !pollContent && !pollReasoning) {
+                                     sendDelta(`[Proxy Error] ${error.name || 'OpenCodeError'}: ${error.data?.message || error.message || 'Unknown error'}`);
+                                 } else if (pollContent || pollReasoning) {
+                                     const safeReasoning = stripFunctionCalls(pollReasoning || '', false);
+                                     const safeContent = stripFunctionCalls(pollContent || '', false);
+                                     logDebug('Polling fallback result', {
+                                         sessionId,
+                                         contentLen: safeContent.length,
+                                         reasoningLen: safeReasoning.length,
+                                         isPartial: partial,
+                                         done: !partial
+                                     });
+                                     if (safeReasoning) sendDelta(safeReasoning, true);
+                                     if (safeContent) sendDelta(safeContent, false);
+                                 } else {
+                                     sendDelta('[Proxy Error] No response content received');
+                                 }
+                             } catch (pollError) {
+                                 logDebug('Polling fallback error', { sessionId, error: pollError.message });
+                                 sendDelta(`[Proxy Error] Polling failed: ${pollError.message}`);
+                             }
+                         } else if (streamedContent || streamedReasoning) {
                             logDebug('SSE stream completed with deltas', {
                                 sessionId,
                                 streamedContentLen: streamedContent.length,
@@ -2114,6 +2124,7 @@ export function startProxy(options) {
         MANAGE_BACKEND: normalizeBool(options.MANAGE_BACKEND) ??
             normalizeBool(process.env.OPENCODE_PROXY_MANAGE_BACKEND) ??
             true,
+        TOOL_TIMEOUT_MS: Number(options.TOOL_TIMEOUT_MS || process.env.OPENCODE_PROXY_TOOL_TIMEOUT_MS || DEFAULT_TOOL_TIMEOUT_MS),
         DISABLE_TOOLS: disableTools,
         DEBUG: String(options.DEBUG || '').toLowerCase() === 'true' ||
             options.DEBUG === '1' ||
