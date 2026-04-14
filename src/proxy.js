@@ -67,6 +67,11 @@ const DEFAULT_EVENT_FIRST_DELTA_TIMEOUT_MS = 180000;
 const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 60000;
 const DEFAULT_TOOL_TIMEOUT_MS = 600000;
 
+// Health check & rate limiting
+const MAX_CONCURRENT_REQUESTS = 3;
+const HEALTH_CHECK_INTERVAL_MS = 30000;
+const HEALTH_CHECK_RETRIES = 3;
+
 const OPENCODE_BASENAME = 'opencode';
 
 function splitPathEnv() {
@@ -852,8 +857,15 @@ export function createApp(config) {
         }
     }
 
+    // Concurrency tracking
+    let activeRequests = 0;
+
     // Chat completions endpoint
     app.post('/v1/chat/completions', async (req, res) => {
+        if (activeRequests >= MAX_CONCURRENT_REQUESTS) {
+            return res.status(503).json({ error: { message: 'Server busy, try again later' } });
+        }
+        activeRequests++;
         try {
             await lock(async () => {
                 let sessionId = null;
@@ -1401,13 +1413,17 @@ const sendDelta = (delta, isReasoning = false) => {
             if (!res.headersSent) {
                 res.status(500).json({ error: { message: error.message, type: error.constructor.name } });
             }
+        } finally {
+            activeRequests--;
         }
     });
 
     // Health check
     app.get('/health', (req, res) => res.json({
         status: 'ok',
-        proxy: true
+        proxy: true,
+        activeRequests,
+        maxConcurrent: MAX_CONCURRENT_REQUESTS
     }));
 
     app.post('/v1/responses', async (req, res) => {
@@ -2120,6 +2136,21 @@ export function startProxy(options) {
         } catch (error) {
             console.error('[Proxy] Backend warmup failed:', error.message);
         }
+        
+        // Periodic health check
+        setInterval(async () => {
+            try {
+                await checkHealth(config.OPENCODE_SERVER_URL, config.OPENCODE_SERVER_PASSWORD);
+            } catch (e) {
+                console.log('[Proxy] Backend health check failed, attempting restart...');
+                try {
+                    await ensureBackend(config);
+                    console.log('[Proxy] Backend restarted successfully');
+                } catch (restartErr) {
+                    console.error('[Proxy] Backend restart failed:', restartErr.message);
+                }
+            }
+        }, HEALTH_CHECK_INTERVAL_MS);
     });
 
     return {
